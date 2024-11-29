@@ -5,39 +5,43 @@
 #include <ServerInstanceBase.h>
 
 #include <Client.h>
-#include <iostream>
 
 #include "GameServer.h"
+#include "IQuit.h"
+
+#include "PacketHandler.h"
 
 namespace fx
 {
 	namespace ServerDecorators
 	{
 		//  Used from the client to signal to the server that the client wants to quit with the given reason.
-		class IQuitPacketHandler
+		class IQuitPacketHandler : public net::PacketHandler<net::packet::ClientIQuit, HashRageString("msgIQuit")>
 		{
 		public:
 			IQuitPacketHandler(fx::ServerInstanceBase* instance)
 			{
 			}
 
-			void Handle(ServerInstanceBase* instance, const fx::ClientSharedPtr& client, net::Buffer& packet)
+			bool Process(ServerInstanceBase* instance, const fx::ClientSharedPtr& client, net::ByteReader& reader, fx::ENetPacketPtr& packet)
 			{
-				const size_t remainingBytes = packet.GetRemainingBytes();
-				if (remainingBytes < 1)
+				if (reader.GetRemaining() < 1)
 				{
-					instance->GetComponent<fx::GameServer>()->DropClientv(client, "");
-					return;
+					instance->GetComponent<fx::GameServer>()->DropClientv(client, clientDropResourceName, fx::ClientDropReason::CLIENT, "");
+					return false;
 				}
 
-				const std::string reason = std::string(
-					packet.Read<std::string_view>(std::min(remainingBytes - 1, static_cast<size_t>(1024))));
-				instance->GetComponent<fx::GameServer>()->DropClientv(client, reason);
-			}
+				const bool result = ProcessPacket(reader, [](net::packet::ClientIQuit& clientIQuit, fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client)
+				{
+					instance->GetComponent<fx::GameServer>()->DropClientv(client, clientDropResourceName, fx::ClientDropReason::CLIENT, std::string(std::string_view(clientIQuit.reason.GetValue().data(), clientIQuit.reason.GetValue().size() - 1)));
+				}, instance, client);
 
-			static constexpr const char* GetPacketId()
-			{
-				return "msgIQuit";
+				if (!result)
+				{
+					instance->GetComponent<fx::GameServer>()->DropClientv(client, clientDropResourceName, fx::ClientDropReason::CLIENT, "");
+				}
+
+				return result;
 			}
 		};
 	}

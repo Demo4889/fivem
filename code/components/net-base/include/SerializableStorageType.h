@@ -2,6 +2,10 @@
 
 #include "DataStream.h"
 
+#include <ForceConsteval.h>
+
+#include "Net.h"
+
 namespace net::storage_type
 {
 	class SerializableSizeOption
@@ -26,24 +30,6 @@ namespace net::storage_type
 	template <typename ElementType, ElementType Min = 0, ElementType Max = 0, bool Remaining = false>
 	class SerializableSizeOptionArea
 	{
-		static ElementType AdjustSize(ElementType size)
-		{
-			if constexpr (Min > 0 && Max > 0)
-			{
-				return std::max(Min, std::min(Max, size));
-			}
-			else if constexpr (Min > 0)
-			{
-				return std::max(Min, size);
-			}
-			else if constexpr (Max > 0)
-			{
-				return std::min(Max, size);
-			}
-
-			return size;
-		}
-
 		template<typename SizeType>
 		static bool ValidateSize(SizeType size)
 		{
@@ -82,7 +68,7 @@ namespace net::storage_type
 		/// <param name="suggestion">Suggested size, only used for writing.</param>
 		/// <param name="valid">True when the received size is allowed, false otherwise</param>
 		/// <returns>Returns the size</returns>
-		template <typename T, typename U>
+		template <typename T, typename U, bool BigEndian>
 		static ElementType Process(T& stream, U suggestion, bool& valid)
 		{
 			if constexpr (T::kType == DataStream::Type::Reader)
@@ -108,6 +94,10 @@ namespace net::storage_type
 				{
 					ElementType size;
 					stream.Field(size);
+					if constexpr (BigEndian)
+					{
+						size = net::ntoh(size);
+					}
 					
 					// size is out of the given constraints
 					if (!ValidateSize(size))
@@ -124,7 +114,59 @@ namespace net::storage_type
 			}
 			else if constexpr (T::kType == DataStream::Type::Writer)
 			{
-				ElementType size = AdjustSize(ElementType(suggestion));
+				if (!ValidateSize(suggestion))
+				{
+					valid = false;
+
+					return ElementType(0);
+				}
+
+				if constexpr (!Remaining)
+				{
+					ElementType size = suggestion;
+					if constexpr (BigEndian)
+					{
+						size = net::hton(size);
+					}
+
+					stream.Field(size);
+				}
+
+				valid = true;
+
+				return suggestion;
+			}
+			else if constexpr (T::kType == DataStream::Type::Counter)
+			{
+				if (!ValidateSize(suggestion))
+				{
+					valid = false;
+
+					return ElementType(0);
+				}
+
+				if constexpr (!Remaining)
+				{
+					ElementType size = suggestion;
+					stream.Field(size);
+				}
+
+				valid = true;
+
+				return suggestion;
+			}
+			else if constexpr (T::kType == DataStream::Type::MaxCounter)
+			{
+				ElementType size;
+				if constexpr (Max > 0)
+				{
+					size = Max;
+				}
+				else
+				{
+					size = net::force_consteval<ElementType, std::numeric_limits<ElementType>::max()>;
+				}
+
 				if constexpr (!Remaining)
 				{
 					stream.Field(size);
@@ -134,16 +176,16 @@ namespace net::storage_type
 
 				return size;
 			}
-			else if constexpr (T::kType == DataStream::Type::Counter)
+			else if constexpr (T::kType == DataStream::Type::MinCounter)
 			{
 				ElementType size;
-				if constexpr (Max > 0)
+				if constexpr (Min > 0)
 				{
-					size = Max;
+					size = Min;
 				}
 				else
 				{
-					size = AdjustSize(ElementType(suggestion));
+					size = net::force_consteval<ElementType, std::numeric_limits<ElementType>::min()>;
 				}
 
 				if constexpr (!Remaining)

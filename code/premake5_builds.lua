@@ -1,5 +1,6 @@
 return {
     five = {
+        game_3323 = "3323_0",
         game_3258 = "3258_0",
         game_3095 = "3095_0",
         game_2944 = "2944_0",
@@ -11,6 +12,7 @@ return {
         game_2189 = "2189_0",
         game_2060 = "2060_2",
         game_1604 = "1604_0",
+        game_1 = "1", -- Special build that is used to remove all DLCs from the game.
     },
     rdr3 = {
         game_1491 = "1491_50",

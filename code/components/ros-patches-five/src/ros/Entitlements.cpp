@@ -10,6 +10,8 @@
 
 #include <ros/EndpointMapper.h>
 
+#include <LegitimacyAPI.h>
+
 #include <base64.h>
 #include <botan/base64.h>
 #include <botan/exceptn.h>
@@ -52,6 +54,7 @@ std::unordered_map<int, BuildData> buildInfoRDR3 = {
 };
 
 std::unordered_map<int, BuildData> buildInfoGTA5 = {
+	{ 3323, { "1.0.3323.0", 57496560, 105, "ed2322439789e7e8f94c8a1b3c1b80d4bcc48c86ed277d42dbf40fc28d412051" } },
 	{ 3258, { "1.0.3258.0", 56066032, 104, "9ec3afccec172a55712bede2dd41d2c330b6d803f9b61b723c8914616ef25aea" } },
 	{ 3095, { "1.0.3095.0", 49634800, 103, "4c663c738e184ea60b3c3208147c3815605d98d1802ec08107b2c22ac5f2c46d" } },
 	{ 2944, { "1.0.2944.0", 49828848, 101, "eb0125ab36004ccdba7bfa918dee37035fb9e23448b850256fd6141ffe194466" } },
@@ -68,8 +71,6 @@ std::unordered_map<int, BuildData> buildInfoGTA5 = {
 using json = nlohmann::json;
 
 int StoreDecryptedBlob(void* a1, void* a2, uint32_t a3, void* inOutBlob, uint32_t a5, void* a6);
-
-extern std::string g_entitlementSource;
 
 bool LoadOwnershipTicket();
 std::string GetRockstarTicketXml();
@@ -160,7 +161,7 @@ std::string GetEntitlementBlock(uint64_t accountId, const std::string& machineHa
 		auto r = cpr::Post(
 			cpr::Url{ CNL_ENDPOINT "api/validate/entitlement" },
 			cpr::Payload{
-				{ "entitlementId", g_entitlementSource },
+				{ "entitlementId", ros::GetEntitlementSource() },
 				{ "machineHash", machineHash },
 				{ "rosId", fmt::sprintf("%lld", accountId) }
 			});
@@ -750,7 +751,7 @@ mapper->AddGameService("ugc.asmx/Publish", [](const std::string& body)
     </FileManifest>
     <IsPreload>false</IsPreload>
   </Result>
-</Response>)", info->second.build, info->second.version, gameExe, info->second.size, info->second.sha256, info->second.sha256, info->second.size);
+</Response>)", info->second.build, info->second.version, info->second.size, gameExe, info->second.sha256, info->second.sha256, info->second.size);
 		}
 
 		return std::string{ R"(<Response xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="RetrieveFileChunkNoAuth" ms="0">

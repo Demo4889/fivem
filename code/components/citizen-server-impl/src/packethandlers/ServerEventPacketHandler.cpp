@@ -12,65 +12,58 @@
 
 #include "packethandlers/ServerEventPacketHandler.h"
 
-void ServerEventPacketHandler::Handle(fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client,
-                                      net::Buffer& buffer)
+#include "ByteReader.h"
+#include "NetEvent.h"
+
+bool ServerEventPacketHandler::Process(fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client, net::ByteReader& reader, fx::ENetPacketPtr& packet)
 {
 	static fx::RateLimiterStore<uint32_t, false> netEventRateLimiterStore{
 		instance->GetComponent<console::Context>().GetRef()
 	};
 	static auto netEventRateLimiter = netEventRateLimiterStore.GetRateLimiter(
-		"netEvent", fx::RateLimiterDefaults{50.f, 200.f});
+		"netEvent", fx::RateLimiterDefaults{ 50.f, 200.f });
 	static auto netFloodRateLimiter = netEventRateLimiterStore.GetRateLimiter(
-		"netEventFlood", fx::RateLimiterDefaults{75.f, 300.f});
+		"netEventFlood", fx::RateLimiterDefaults{ 75.f, 300.f });
 	static auto netEventSizeRateLimiter = netEventRateLimiterStore.GetRateLimiter(
-		"netEventSize", fx::RateLimiterDefaults{128 * 1024.0, 384 * 1024.0});
+		"netEventSize", fx::RateLimiterDefaults{ 128 * 1024.0, 384 * 1024.0 });
 
-	const uint32_t netId = client->GetNetId();
-
-	if (!netEventRateLimiter->Consume(netId))
+	return ProcessPacket(reader, [](net::packet::ClientServerEvent& clientServerEvent, fx::ServerInstanceBase* instance, const fx::ClientSharedPtr& client)
 	{
-		if (!netFloodRateLimiter->Consume(netId))
+		const uint32_t netId = client->GetNetId();
+
+		if (!netEventRateLimiter->Consume(netId))
 		{
-			instance->GetComponent<fx::GameServer>()->DropClient(client, "Reliable network event overflow.");
+			if (!netFloodRateLimiter->Consume(netId))
+			{
+				instance->GetComponent<fx::GameServer>()->DropClientWithReason(client, fx::serverDropResourceName, fx::ClientDropReason::NET_EVENT_RATE_LIMIT, "Reliable network event overflow.");
+			}
+
+			return;
 		}
 
-		return;
-	}
+		const std::string_view eventNameView = { reinterpret_cast<const char*>(clientServerEvent.eventName.GetValue().data()), clientServerEvent.eventName.GetValue().size() - 1 };
 
-	const uint16_t eventNameLength = buffer.Read<uint16_t>();
+		const uint32_t dataLength = static_cast<uint32_t>(clientServerEvent.eventData.GetValue().size());
 
-	// validate input, eventNameLength 1 would be zero, because we remove last byte
-	if (eventNameLength <= 1)
-	{
-		return;
-	}
+		if (!netEventSizeRateLimiter->Consume(netId, static_cast<double>(eventNameView.size() + dataLength)))
+		{
+			const std::string eventName(eventNameView);
+			// if this happens, try increasing rateLimiter_netEventSize_rate and rateLimiter_netEventSize_burst
+			// preferably, fix client scripts to not have this large a set of events with high frequency
+			instance->GetComponent<fx::GameServer>()->DropClientWithReason(client, fx::serverDropResourceName, fx::ClientDropReason::NET_EVENT_RATE_LIMIT, "Reliable network event size overflow: %s",
+			eventName);
+			return;
+		}
 
-	const std::string_view eventNameView = buffer.Read<std::string_view>(eventNameLength - 1);
+		const std::string_view dataView = { reinterpret_cast<const char*>(clientServerEvent.eventData.GetValue().data()), clientServerEvent.eventData.GetValue().size() };
 
-	// read 0, maybe we can drop the uint8 in the future with a new net version update
-	buffer.Read<uint8_t>();
+		const fwRefContainer<fx::ResourceManager> resourceManager = instance->GetComponent<fx::ResourceManager>();
+		const fwRefContainer<fx::ResourceEventManagerComponent> eventManager = resourceManager->GetComponent<fx::ResourceEventManagerComponent>();
 
-	const uint32_t dataLength = static_cast<uint32_t>(buffer.GetRemainingBytes());
-
-	if (!netEventSizeRateLimiter->Consume(netId, static_cast<double>(eventNameView.size() + dataLength)))
-	{
-		const std::string eventName(eventNameView);
-		// if this happens, try increasing rateLimiter_netEventSize_rate and rateLimiter_netEventSize_burst
-		// preferably, fix client scripts to not have this large a set of events with high frequency
-		instance->GetComponent<fx::GameServer>()->DropClient(client, "Reliable network event size overflow: %s",
-		                                                     eventName);
-		return;
-	}
-
-	const std::string_view dataView = buffer.Read<std::string_view>(dataLength);
-
-	const fwRefContainer<fx::ResourceManager> resourceManager = instance->GetComponent<fx::ResourceManager>();
-	const fwRefContainer<fx::ResourceEventManagerComponent> eventManager = resourceManager->GetComponent<
-		fx::ResourceEventManagerComponent>();
-
-	eventManager->QueueEvent(
-		std::string(eventNameView),
-		std::string(dataView),
-		"net:" + std::to_string(netId)
-	);
+		eventManager->QueueEvent(
+			std::string(eventNameView),
+			std::string(dataView),
+			"net:" + std::to_string(netId)
+		);
+	}, instance, client);
 }

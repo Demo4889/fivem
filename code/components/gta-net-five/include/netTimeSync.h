@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TimeSync.h"
+
 struct TrustAddressData
 {
 	uint32_t m_addr;
@@ -43,10 +45,9 @@ public:
 	virtual ~netTimeSync() = 0;
 
 	void Update();
-	void HandleTimeSync(net::Buffer& buffer);
+	void HandleTimeSync(net::packet::TimeSyncResponse& reader);
 	bool IsInitialized();
 	void SetConnectionManager(netConnectionManager* mgr);
-
 private:
 	netConnectionManager* m_connectionMgr; // +8 (1604)
 	TrustAddress<Build> m_trustAddr; // +16
@@ -72,6 +73,8 @@ private:
 	uint8_t m_applyFlags; // +132
 	uint8_t m_disabled; // +133
 };
+
+static void HandleTimeSyncUpdatePacket(net::packet::TimeSyncResponse& buf);
 }
 
 static_assert(sizeof(rage::netTimeSync<1604>) == 136);

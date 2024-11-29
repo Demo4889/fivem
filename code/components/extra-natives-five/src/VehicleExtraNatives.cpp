@@ -105,7 +105,7 @@ struct VehicleDashboardData
 	float temp;
 	float vacuum;
 	float boost;
-	float waterTemp;
+	float currentGear;
 	float oilTemp;
 	float oilPressure;
 	char _pad[0x3F]; // aircraft data
@@ -236,6 +236,8 @@ static void writeVehicleMemory(fx::ScriptContext& context, std::string_view nn)
 	}
 }
 
+static float* PassengerMassPtr;
+
 static int StreamRenderGfxPtrOffset;
 static int HandlingDataPtrOffset;
 static int DrawHandlerPtrOffset;
@@ -314,6 +316,8 @@ static int VehicleDamageStructOffset;
 static bool* g_trainsForceDoorsOpen;
 static int TrainDoorCountOffset;
 static int TrainDoorArrayPointerOffset;
+static int TrainFlagOffset;
+constexpr int TrainStopAtStationsFlag = 4;
 
 static int VehicleRepairMethodVtableOffset;
 
@@ -586,6 +590,7 @@ static HookFunction initFunction([]()
 		WheelHealthOffset = *hook::get_pattern<uint32_t>("75 24 F3 0F 10 ? ? ? 00 00 F3 0F", 6);
 		LightMultiplierGetOffset = *hook::get_pattern<uint32_t>("00 00 48 8B CE F3 0F 59 ? ? ? 00 00 F3 41", 9);
 		VehicleRepairMethodVtableOffset = *hook::get_pattern<uint32_t>("C1 E8 19 A8 01 74 ? 48 8B 81", -14);
+		TrainFlagOffset = *hook::get_pattern<uint32_t>("80 8B ? ? ? ? ? 8B 05 ? ? ? ? FF C8", 2);
 	}
 
 	{
@@ -751,6 +756,11 @@ static HookFunction initFunction([]()
 	{
 		VehiclePitchBiasOffset = *hook::get_pattern<uint32_t>("0F 2F F7 44 0F 28 C0 F3 44 0F 58 83", 12);
 		VehicleRollBiasOffset = VehiclePitchBiasOffset - 4;
+	}
+
+	{
+		auto location = hook::get_pattern<char>("F3 0F 59 3D ? ? ? ? F3 0F 58 3D ? ? ? ? 48 85 C9", 4);
+		PassengerMassPtr = hook::get_address<float*>(location);
 	}
 
 	{
@@ -931,9 +941,9 @@ static HookFunction initFunction([]()
 		context.SetResult<float>(g_DashboardData.boost);
 	});
 
-	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_WATER_TEMP", [](fx::ScriptContext& context)
+	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_CURRENT_GEAR", [](fx::ScriptContext& context)
 	{
-		context.SetResult<float>(g_DashboardData.waterTemp);
+		context.SetResult<float>(g_DashboardData.currentGear);
 	});
 
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_DASHBOARD_OIL_PRESSURE", [](fx::ScriptContext& context)
@@ -1459,6 +1469,10 @@ static HookFunction initFunction([]()
 		GetTrainDoor(train, doorIndex)->ratio = ratio;
 	}));
 
+	fx::ScriptEngine::RegisterNativeHandler("SET_TRAIN_STOP_AT_STATIONS", std::bind(writeVehicleMemoryBit<&TrainFlagOffset, TrainStopAtStationsFlag>, _1, "SET_TRAIN_STOP_AT_STATIONS"));
+
+	fx::ScriptEngine::RegisterNativeHandler("DOES_TRAIN_STOP_AT_STATIONS", std::bind(readVehicleMemoryBit<&TrainFlagOffset, TrainStopAtStationsFlag>, _1, "DOES_TRAIN_STOP_AT_STATIONS"));
+
 	fx::ScriptEngine::RegisterNativeHandler("GET_VEHICLE_WHEEL_X_OFFSET", makeWheelFunction([](fx::ScriptContext& context, fwEntity* vehicle, uintptr_t wheelAddr)
 	{
 		context.SetResult<float>(*reinterpret_cast<float*>(wheelAddr + WheelXOffsetOffset));
@@ -1516,6 +1530,22 @@ static HookFunction initFunction([]()
 	fx::ScriptEngine::RegisterNativeHandler("RESET_FLY_THROUGH_WINDSCREEN_PARAMS", [](fx::ScriptContext& context)
 	{
 		ResetFlyThroughWindscreenParams();
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("SET_GLOBAL_PASSENGER_MASS_MULTIPLIER", [](fx::ScriptContext& context)
+	{
+		float weight = context.GetArgument<float>(0);
+
+		if (weight < 0.0)
+		{
+			weight = 0.0;
+		}
+		*PassengerMassPtr = weight;
+	});
+
+	fx::ScriptEngine::RegisterNativeHandler("GET_GLOBAL_PASSENGER_MASS_MULTIPLIER", [](fx::ScriptContext& context)
+	{
+		context.SetResult<float>(*PassengerMassPtr);
 	});
 
 	static struct : jitasm::Frontend
@@ -1595,6 +1625,8 @@ static HookFunction initFunction([]()
 
 		g_isFuelConsumptionOn = false;
 		g_globalFuelConsumptionMultiplier = 1.f;
+
+		*PassengerMassPtr = 0.05f;
 	});
 
 	fx::ScriptEngine::RegisterNativeHandler("SET_VEHICLE_AUTO_REPAIR_DISABLED", [](fx::ScriptContext& context)

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TimeSync.h"
+
 struct TimeSyncPadding1311
 {
 	char m_pad[4];
@@ -29,7 +31,7 @@ public:
 	virtual ~netTimeSync() = 0;
 
 	void Update();
-	void HandleTimeSync(net::Buffer& buffer);
+	void HandleTimeSync(net::packet::TimeSyncResponse& packet);
 	bool IsInitialized();
 	void SetConnectionManager(netConnectionManager* mgr);
 
@@ -57,6 +59,8 @@ private:
 	uint8_t m_disabled; // +150
 	uint8_t m_useCloudTime; // +151
 };
+
+static void HandleTimeSyncUpdatePacket(net::packet::TimeSyncResponse& buf);
 }
 
 static_assert(sizeof(rage::netTimeSync<1311>) == 152);

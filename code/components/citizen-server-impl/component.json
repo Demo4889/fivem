@@ -9,6 +9,8 @@
 		"citizen:server:net",
 		"citizen:scripting:mono",
 		"vfs:impl:server",
+		"net:packet",
+		"pool-sizes-state",
 		"vendor:cpr",
 		"vendor:citizen_util",
 		"vendor:citizen_enet",

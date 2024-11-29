@@ -1,4 +1,5 @@
 local gameBuilds = require("premake5_builds")
+local setCfxDefines = require("premake5_defines")
 
 -- to work around slow init times due to packagesrv.com being down
 premake.downloadModule = function()
@@ -146,6 +147,10 @@ workspace "CitizenMP"
 		"../vendor/boost-submodules/boost-mp11/include/",
 		"../vendor/boost-submodules/boost-logic/include/",
 		"../vendor/boost-submodules/boost-endian/include/",
+		"../vendor/boost-submodules/boost-describe/include/",
+		"../vendor/boost-submodules/boost-scope/include/",
+		"../vendor/boost-submodules/boost-align/include/",
+		"../vendor/boost-submodules/boost-static-string/include/",
 	}
 
 	filter { 'language:C or language:C++'}
@@ -155,6 +160,8 @@ workspace "CitizenMP"
 		defines { "_PPLTASK_ASYNC_LOGGING=0"}
 
 	filter {}
+
+	setCfxDefines()
 
 	libdirs { "deplibs/lib/" }
 
@@ -230,9 +237,15 @@ workspace "CitizenMP"
 
 	local buildsDef = "GAME_BUILDS="
 	local builds = gameBuilds[_OPTIONS["game"]]
+
 	if builds ~= nil then
-		for key, _ in pairs(builds) do
-			buildsDef = buildsDef .. "(" .. string.sub(key, string.len("game_") + 1) .. ")"
+		local buildsOrdered = {}
+
+		for n in pairs(builds) do table.insert(buildsOrdered, n) end
+		table.sort(buildsOrdered)
+
+		for _, build in ipairs(buildsOrdered) do
+			buildsDef = buildsDef .. "(" .. string.sub(build, string.len("game_") + 1) .. ")"
 		end
 
 		filter 'language:C or language:C++'
@@ -293,8 +306,9 @@ workspace "CitizenMP"
 		include 'client/diag'
 	else
 		include 'server/launcher'
-		include 'tests'
 	end
+
+	include 'tests'
 	
 	if os.istarget('windows') then
 		include 'premake5_layout.lua'
@@ -549,6 +563,7 @@ if _OPTIONS['game'] ~= 'launcher' then
 		else
 			if _OPTIONS['game'] == 'five' then
 				files { 'client/clrcore/External/*.cs' }
+				files { 'client/clrcore-v2/Game/Shared/*.cs' }
 			end
 			
 			defines { 'USE_HYPERDRIVE' }

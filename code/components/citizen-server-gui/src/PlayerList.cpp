@@ -90,7 +90,7 @@ static const auto& CollectPlayers(fx::ServerInstanceBase* instance)
 		std::unique_lock lock(g_playerListDataMutex);
 		auto& entry = g_playerListData[client->GetGuid()];
 		entry.name = fmt::sprintf("[%d] %s", client->GetNetId(), client->GetName());
-		unsigned int secondsTotalOnline = std::chrono::duration_cast<std::chrono::seconds>(client->GetLastSeen() - client->GetFirstSeen()).count();
+		unsigned int secondsTotalOnline = client->GetSecondsOnline();
 		entry.secondsOnline = (secondsTotalOnline % 60);
 		entry.minutesOnline = ((secondsTotalOnline / 60) % 60);
 		entry.hoursOnline = (secondsTotalOnline / 3600);
@@ -117,7 +117,7 @@ static const auto& CollectPlayers(fx::ServerInstanceBase* instance)
 	return g_playerListData;
 }
 
-void RecvFromClient_Callback(fx::Client* client, uint32_t packetId, net::Buffer& buffer)
+void RecvFromClient_Callback(fx::Client* client, uint32_t packetId, net::ByteReader& reader)
 {
 	// don't try to check when the list isn't active
 	if (!svplayerlist.toggleVar)
@@ -133,18 +133,18 @@ void RecvFromClient_Callback(fx::Client* client, uint32_t packetId, net::Buffer&
 	{
 		return;
 	}
-	entry.advancedData.bytesInRaw += buffer.GetLength();
+	entry.advancedData.bytesInRaw += reader.GetCapacity();
 
-	auto data = buffer.GetData();
+	auto data = reader.GetData();
 	// first 4 bytes are the rageHash
-	uint32_t pktHash = *(uint32_t*)data.data();
+	const uint32_t pktHash = *reinterpret_cast<const uint32_t*>(data);
 	int i = 0;
 	for (auto hash : net::PacketNames)
 	{
 		if (hash.first == pktHash)
 		{
-			entry.advancedData.pktOccurancesRecv[i]++;
-			entry.advancedData.pktBytesRecv[i] += buffer.GetLength();
+			++entry.advancedData.pktOccurancesRecv[i];
+			entry.advancedData.pktBytesRecv[i] += reader.GetCapacity();
 		}
 		i++;
 	}

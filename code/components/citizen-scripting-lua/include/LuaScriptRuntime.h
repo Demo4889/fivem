@@ -18,6 +18,8 @@
 
 #include <fxScripting.h>
 
+#include <ScriptInvoker.h>
+
 #include <Resource.h>
 #include <ManifestVersion.h>
 
@@ -63,41 +65,10 @@ enum class LuaProfilingMode : uint8_t
 	Shutdown,
 };
 
-enum class LuaMetaFields : uint8_t
-{
-	PointerValueInt,
-	PointerValueFloat,
-	PointerValueVector,
-	ReturnResultAnyway,
-	ResultAsInteger,
-	ResultAsLong,
-	ResultAsFloat,
-	ResultAsString,
-	ResultAsVector,
-	ResultAsObject,
-	AwaitSentinel,
-	Max
-};
-
 /// <summary>
 /// </summary>
 namespace fx
 {
-struct PointerFieldEntry
-{
-	bool empty;
-	uintptr_t value;
-	PointerFieldEntry()
-		: empty(true), value(0)
-	{
-	}
-};
-
-struct PointerField
-{
-	PointerFieldEntry data[64];
-};
-
 #if LUA_VERSION_NUM >= 504 && defined(_WIN32)
 #define LUA_USE_RPMALLOC
 #endif
@@ -216,8 +187,6 @@ private:
 
 	void* m_parentObject = nullptr;
 
-	PointerField m_pointerFields[3];
-
 	int m_instanceId;
 
 	std::string m_nativesDir;
@@ -332,11 +301,6 @@ public:
 	LUA_INLINE IScriptHostWithBookmarks* GetScriptHostWithBookmarks()
 	{
 		return m_bookmarkHost;
-	}
-
-	LUA_INLINE PointerField* GetPointerFields()
-	{
-		return m_pointerFields;
 	}
 
 	LUA_INLINE const char* GetResourceName()

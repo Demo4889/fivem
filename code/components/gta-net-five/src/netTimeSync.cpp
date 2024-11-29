@@ -13,6 +13,11 @@
 #include "nutsnbolts.h"
 #include "netTimeSync.h"
 
+#include <TimeSync.h>
+
+#include "ByteWriter.h"
+#include "PacketHandler.h"
+
 extern ICoreGameInit* icgi;
 extern NetLibrary* g_netLibrary;
 
@@ -57,17 +62,27 @@ void rage::netTimeSync<Build>::Update()
 
 	if (/*m_connectionMgr /*&& m_flags & 2 && */ !m_disabled)
 	{
-		uint32_t curTime = timeGetTime();
+		const uint32_t curTime = timeGetTime();
 
-		if (!m_nextSync || int32_t(timeGetTime() - m_nextSync) >= 0)
+		if (!m_nextSync || static_cast<int32_t>(timeGetTime() - m_nextSync) >= 0)
 		{
 			m_requestSequence++;
 
-			net::Buffer outBuffer;
-			outBuffer.Write<uint32_t>(curTime); // request time
-			outBuffer.Write<uint32_t>(m_requestSequence); // request sequence
+			net::packet::TimeSyncRequestPacket packet;
+			packet.data.requestTime = curTime;
+			packet.data.requestSequence = m_requestSequence;
 
-			g_netLibrary->SendReliableCommand("msgTimeSyncReq", (const char*)outBuffer.GetData().data(), outBuffer.GetCurOffset());
+			static size_t kMaxTimeSyncRequestPacket = net::SerializableComponent::GetMaxSize<net::packet::TimeSyncRequestPacket>();
+			static std::vector<uint8_t> packetBuffer (kMaxTimeSyncRequestPacket);
+
+			net::ByteWriter writer (packetBuffer.data(), kMaxTimeSyncRequestPacket);
+			if (!packet.Process(writer))
+			{
+				trace("Serialization of the TimeSyncRequestPacket failed. Please report this error at https://github.com/citizenfx/fivem.\n");
+				return;
+			}
+
+			g_netLibrary->SendReliablePacket(packet.type, reinterpret_cast<const char*>(packetBuffer.data()), writer.GetOffset());
 
 			m_nextSync = (curTime + m_effectiveTimeBetweenSyncs) | 1;
 		}
@@ -75,11 +90,11 @@ void rage::netTimeSync<Build>::Update()
 }
 
 template<int Build>
-void rage::netTimeSync<Build>::HandleTimeSync(net::Buffer& buffer)
+void rage::netTimeSync<Build>::HandleTimeSync(net::packet::TimeSyncResponse& packet)
 {
-	auto reqTime = buffer.Read<uint32_t>();
-	auto reqSequence = buffer.Read<uint32_t>();
-	auto resDelta = buffer.Read<uint32_t>();
+	const uint32_t reqTime = packet.request.requestTime;
+	const uint32_t reqSequence = packet.request.requestSequence;
+	const uint32_t resDelta = packet.serverTimeMillis;
 
 	if (m_disabled)
 	{
@@ -97,7 +112,7 @@ void rage::netTimeSync<Build>::HandleTimeSync(net::Buffer& buffer)
 		return;
 	}
 
-	auto rtt = timeGetTime() - reqTime;
+	const auto rtt = timeGetTime() - reqTime;
 
 	// bad timestamp, negative time passed
 	if (int32_t(rtt) <= 0)
@@ -105,7 +120,7 @@ void rage::netTimeSync<Build>::HandleTimeSync(net::Buffer& buffer)
 		return;
 	}
 
-	int32_t timeDelta = resDelta + (rtt / 2) - timeGetTime();
+	const int32_t timeDelta = resDelta + (rtt / 2) - timeGetTime();
 
 	// is this a low RTT, or did we retry often enough?
 	if (rtt <= 300 || m_retryCount >= 10)
@@ -232,7 +247,7 @@ static inline void TimeSyncMainGameFrameUpdate()
 #endif
 }
 
-static inline void HandleTimeSyncUpdatePacket(net::Buffer& buf)
+static void rage::HandleTimeSyncUpdatePacket(net::packet::TimeSyncResponse& buf)
 {
 #ifdef GTA_FIVE
 	if (xbr::IsGameBuildOrGreater<2372>())
@@ -259,15 +274,27 @@ static inline void HandleTimeSyncUpdatePacket(net::Buffer& buf)
 #endif
 }
 
+namespace fx
+{
+class TimeSyncResponsePacketHandler : public net::PacketHandler<net::packet::TimeSyncResponse, HashRageString("msgTimeSync")>
+{
+public:
+	template<typename T>
+	bool Process(T& stream)
+	{
+		return ProcessPacket(stream, [](net::packet::TimeSyncResponse& timeSyncResponse)
+		{
+			rage::HandleTimeSyncUpdatePacket(timeSyncResponse);
+		});
+	}
+};
+}
+
 static InitFunction initFunction([]()
 {
 	NetLibrary::OnNetLibraryCreate.Connect([](NetLibrary* lib)
 	{
-		lib->AddReliableHandler("msgTimeSync", [](const char* data, size_t len)
-		{
-			net::Buffer buf(reinterpret_cast<const uint8_t*>(data), len);
-			HandleTimeSyncUpdatePacket(buf);
-		});
+		lib->AddPacketHandler<fx::TimeSyncResponsePacketHandler>(false);
 	});
 });
 

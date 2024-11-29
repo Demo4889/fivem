@@ -9,6 +9,7 @@
 #include "fxScripting.h"
 
 #include <ScriptEngine.h>
+#include <ScriptInvoker.h>
 
 #include "LuaScriptRuntime.h"
 #include "LuaScriptNatives.h"
@@ -39,6 +40,8 @@ extern LUA_INTERNAL_LINKAGE
 #include <collections/lmprof_stack.h>
 }
 
+using namespace fx::invoker;
+
 #if defined(GTA_FIVE)
 static constexpr std::pair<const char*, ManifestVersion> g_scriptVersionPairs[] = {
 	{ "natives_21e43a33.lua", guid_t{ 0 } },
@@ -64,24 +67,18 @@ static constexpr std::pair<const char*, ManifestVersion> g_scriptVersionPairs[] 
 
 // Utility for sanitizing error messages in an unprotected states. Avoid string coercion (cvt2str) to ensure errors 
 // do not compound.
-#define LUA_SCRIPT_TRACE(L, MSG, ...)                     \
-    try                                                   \
-    {                                                     \
-        const char* err = "error object is not a string"; \
-        if (lua_type((L), -1) == LUA_TSTRING)             \
-        {                                                 \
-            err = lua_tostring((L), -1);                  \
-        }                                                 \
-        ScriptTrace(MSG ": %s\n", ##__VA_ARGS__, err);    \
-    }                                                     \
-    catch (...)                                           \
-    {                                                     \
-    }                                                     \
-    lua_pop((L), 1)
+#define LUA_SCRIPT_TRACE(L, MSG, ...)                  \
+	try                                                \
+	{                                                  \
+		const char* err = Lua_GetErrorMessage(L, -1);  \
+		ScriptTrace(MSG ": %s\n", ##__VA_ARGS__, err); \
+	}                                                  \
+	catch (...)                                        \
+	{                                                  \
+	}                                                  \
+	lua_pop((L), 1)
 
-/// <summary>
-/// </summary>
-uint8_t g_metaFields[(size_t)LuaMetaFields::Max];
+static uint8_t g_awaitSentinel;
 
 /// <summary>
 /// </summary>
@@ -91,7 +88,6 @@ static fx::OMPtr<fx::LuaScriptRuntime> g_currentLuaRuntime;
 /// </summary>
 static IScriptHost* g_lastScriptHost;
 
-uint64_t g_tickTime;
 bool g_hadProfiler;
 
 #if defined(LUA_USE_RPMALLOC)
@@ -216,6 +212,26 @@ static int Lua_Print(lua_State* L)
 	}
 	ScriptTrace("\n");
 	return 0;
+}
+
+static const char* Lua_GetErrorMessage(lua_State* L, int index)
+{
+	const char* msg = "error object is not a string";
+	if (lua_type(L, index) == LUA_TSTRING)
+	{
+		msg = lua_tostring(L, index);
+	}
+	else if (luaL_callmeta(L, index, "__tostring") && lua_type(L, -1) == LUA_TSTRING)
+	{
+		msg = lua_tostring(L, -1);
+		lua_pop(L, 1);
+	}
+	else
+	{
+		lua_pop(L, 1);
+	}
+
+	return msg;
 }
 
 #if LUA_VERSION_NUM >= 504
@@ -672,10 +688,17 @@ static int Lua_SubmitBoundaryEnd(lua_State* L)
 	return 0;
 }
 
-template<LuaMetaFields metaField>
+template<MetaField metaField>
 static int Lua_GetMetaField(lua_State* L)
 {
-	lua_pushlightuserdata(L, &g_metaFields[(int)metaField]);
+	lua_pushlightuserdata(L, ScriptNativeContext::GetMetaField(metaField));
+
+	return 1;
+}
+
+static int Lua_GetAwaitSentinel(lua_State* L)
+{
+	lua_pushlightuserdata(L, &g_awaitSentinel);
 
 	return 1;
 }
@@ -715,51 +738,33 @@ static int Lua_ResultAsObject(lua_State* L)
 		lua_remove(L, eh);
 	});
 
-	return Lua_GetMetaField<LuaMetaFields::ResultAsObject>(L);
+	return Lua_GetMetaField<MetaField::ResultAsObject>(L);
 }
 
-template<LuaMetaFields MetaField>
+template<MetaField field>
 static int Lua_GetPointerField(lua_State* L)
 {
-	auto& runtime = LuaScriptRuntime::GetCurrent();
+	uintptr_t value = 0;
 
-	auto pointerFields = runtime->GetPointerFields();
-	auto pointerFieldStart = &pointerFields[(int)MetaField];
+	const int type = lua_type(L, 1);
 
-	static uintptr_t dummyOut;
-	PointerFieldEntry* pointerField = nullptr;
-
-	for (int i = 0; i < _countof(pointerFieldStart->data); i++)
+	// to prevent accidental passing of arguments like _r, we check if this is a userdata
+	if (type == LUA_TNIL || type == LUA_TLIGHTUSERDATA || type == LUA_TUSERDATA)
 	{
-		if (pointerFieldStart->data[i].empty)
-		{
-			pointerField = &pointerFieldStart->data[i];
-			pointerField->empty = false;
-
-			// to prevent accidental passing of arguments like _r, we check if this is a userdata
-			const int type = lua_type(L, 1);
-			if (type == LUA_TNIL || type == LUA_TLIGHTUSERDATA || type == LUA_TUSERDATA)
-			{
-				pointerField->value = 0;
-			}
-			else if (MetaField == LuaMetaFields::PointerValueFloat)
-			{
-				float value = static_cast<float>(luaL_checknumber(L, 1));
-
-				pointerField->value = *reinterpret_cast<uint32_t*>(&value);
-			}
-			else if (MetaField == LuaMetaFields::PointerValueInt)
-			{
-				intptr_t value = luaL_checkinteger(L, 1);
-
-				pointerField->value = value;
-			}
-
-			break;
-		}
+		value = 0;
+	}
+	else if constexpr (field == MetaField::PointerValueInt)
+	{
+		value = (uint64_t)luaL_checkinteger(L, 1);
+	}
+	else if constexpr (field == MetaField::PointerValueFloat)
+	{
+		float fvalue = static_cast<float>(luaL_checknumber(L, 1));
+		value = *reinterpret_cast<uint32_t*>(&value);
 	}
 
-	lua_pushlightuserdata(L, (pointerField) ? static_cast<void*>(pointerField) : &dummyOut);
+	lua_pushlightuserdata(L, ScriptNativeContext::GetPointerField(field, value));
+
 	return 1;
 }
 
@@ -939,7 +944,7 @@ bool LuaScriptRuntime::RunBookmark(uint64_t bookmark)
 			auto userData = lua_touserdata(thread, -1);
 			lua_pop(thread, 1);
 
-			if (userData == &g_metaFields[(int)LuaMetaFields::AwaitSentinel])
+			if (userData == &g_awaitSentinel)
 			{
 				// resume again with a reattach callback
 				lua_pushlightuserdata(thread, this);
@@ -970,12 +975,7 @@ bool LuaScriptRuntime::RunBookmark(uint64_t bookmark)
 	{
 		if (resumeValue != LUA_OK)
 		{
-			std::string err = "error object is not a string";
-			if (lua_type(thread, -1) == LUA_TSTRING)
-			{
-				err = lua_tostring(thread, -1);
-			}                        
-
+			std::string err = Lua_GetErrorMessage(thread, -1);                    
 			static auto formatStackTrace = fx::ScriptEngine::GetNativeHandler(HashString("FORMAT_STACK_TRACE"));
 			std::string stackData = "(nil stack trace)";
 
@@ -997,11 +997,7 @@ bool LuaScriptRuntime::RunBookmark(uint64_t bookmark)
 #if LUA_VERSION_NUM >= 504
 			int resetStatus = lua_resetthread(thread);
 
-			std::string resetErr = "error object is not a string";
-			if (lua_type(thread, -1) == LUA_TSTRING)
-			{
-				resetErr = lua_tostring(thread, -1);
-			}
+			std::string resetErr = Lua_GetErrorMessage(thread, -1);
 
 			// We can't just check whether the resetStatus is OK because
 			// if there was no error lua_resetthread returns the same status it received
@@ -1183,20 +1179,20 @@ static const struct luaL_Reg g_citizenLib[] = {
 	{ "SubmitBoundaryEnd", Lua_SubmitBoundaryEnd },
 	{ "SetStackTraceRoutine", Lua_SetStackTraceRoutine },
 	// metafields
-	{ "PointerValueIntInitialized", Lua_GetPointerField<LuaMetaFields::PointerValueInt> },
-	{ "PointerValueFloatInitialized", Lua_GetPointerField<LuaMetaFields::PointerValueFloat> },
-	{ "PointerValueInt", Lua_GetMetaField<LuaMetaFields::PointerValueInt> },
-	{ "PointerValueFloat", Lua_GetMetaField<LuaMetaFields::PointerValueFloat> },
-	{ "PointerValueVector", Lua_GetMetaField<LuaMetaFields::PointerValueVector> },
-	{ "ReturnResultAnyway", Lua_GetMetaField<LuaMetaFields::ReturnResultAnyway> },
-	{ "ResultAsInteger", Lua_GetMetaField<LuaMetaFields::ResultAsInteger> },
-	{ "ResultAsLong", Lua_GetMetaField<LuaMetaFields::ResultAsLong> },
-	{ "ResultAsFloat", Lua_GetMetaField<LuaMetaFields::ResultAsFloat> },
-	{ "ResultAsString", Lua_GetMetaField<LuaMetaFields::ResultAsString> },
-	{ "ResultAsVector", Lua_GetMetaField<LuaMetaFields::ResultAsVector> },
+	{ "PointerValueIntInitialized", Lua_GetPointerField<MetaField::PointerValueInt> },
+	{ "PointerValueFloatInitialized", Lua_GetPointerField<MetaField::PointerValueFloat> },
+	{ "PointerValueInt", Lua_GetMetaField<MetaField::PointerValueInt> },
+	{ "PointerValueFloat", Lua_GetMetaField<MetaField::PointerValueFloat> },
+	{ "PointerValueVector", Lua_GetMetaField<MetaField::PointerValueVector> },
+	{ "ReturnResultAnyway", Lua_GetMetaField<MetaField::ReturnResultAnyway> },
+	{ "ResultAsInteger", Lua_GetMetaField<MetaField::ResultAsInteger> },
+	{ "ResultAsLong", Lua_GetMetaField<MetaField::ResultAsLong> },
+	{ "ResultAsFloat", Lua_GetMetaField<MetaField::ResultAsFloat> },
+	{ "ResultAsString", Lua_GetMetaField<MetaField::ResultAsString> },
+	{ "ResultAsVector", Lua_GetMetaField<MetaField::ResultAsVector> },
 	{ "ResultAsObject", Lua_Noop }, // for compatibility
 	{ "ResultAsObject2", Lua_ResultAsObject },
-	{ "AwaitSentinel", Lua_GetMetaField<LuaMetaFields::AwaitSentinel> },
+	{ "AwaitSentinel", Lua_GetAwaitSentinel },
 	{ nullptr, nullptr }
 };
 }

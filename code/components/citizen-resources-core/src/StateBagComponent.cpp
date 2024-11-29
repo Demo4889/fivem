@@ -31,7 +31,7 @@ public:
 
 	virtual void HandlePacket(int source, std::string_view data, std::string* outBagNameName = nullptr) override;
 
-	virtual void HandlePacketV2(int source, StateBagMessage& message, std::string_view* outBagNameName = nullptr) override;
+	virtual void HandlePacketV2(int source, net::packet::StateBagV2& message, std::string_view* outBagNameName = nullptr) override;
 
 	virtual std::shared_ptr<StateBag> GetStateBag(std::string_view id) override;
 
@@ -58,7 +58,9 @@ public:
 	void UnregisterStateBag(std::string_view id);
 
 	// #TODO: this should eventually actually queue a send to allow for throttling
-	void QueueSend(int target, std::string_view packet);
+	void QueueSend(int target, net::packet::StateBagPacket& packet);
+
+	void QueueSend(int target, net::packet::StateBagV2Packet& packet);
 
 	inline std::tuple<std::shared_lock<std::shared_mutex>, std::reference_wrapper<const std::unordered_set<int>>> GetTargets()
 	{
@@ -115,6 +117,8 @@ public:
 	virtual ~StateBagImpl() override;
 
 	virtual std::optional<std::string> GetKey(std::string_view key) override;
+	virtual bool HasKey(std::string_view key) override;
+	virtual std::vector<std::string> GetKeys() override;
 	virtual void SetKey(int source, std::string_view key, std::string_view data, bool replicated = true) override;
 	virtual void SetRoutingTargets(const std::set<int>& peers) override;
 
@@ -181,6 +185,26 @@ std::optional<std::string> StateBagImpl::GetKey(std::string_view key)
 	return {};
 }
 
+std::vector<std::string> StateBagImpl::GetKeys()
+{
+	std::vector<std::string> keys;
+	std::shared_lock _(m_dataMutex);
+
+	for (auto data : m_data)
+	{
+		keys.push_back(data.first);
+	}
+	
+	return keys;
+}
+
+
+bool StateBagImpl::HasKey(std::string_view key)
+{
+	std::shared_lock _(m_dataMutex);
+	return m_data.count(key) != 0;
+}
+
 void StateBagImpl::SetKey(int source, std::string_view key, std::string_view data, bool replicated /* = true */)
 {
 	// prepare a potentially async continuation
@@ -245,12 +269,17 @@ void StateBagImpl::SetKey(int source, std::string_view key, std::string_view dat
 	continuation(key, data);
 }
 
+// https://github.com/msgpack/msgpack/blob/master/spec.md#formats
+constexpr char MsgPackNil = static_cast<char>(0xc0);
 void StateBagImpl::SetKeyInternal(int source, std::string_view key, std::string_view data, bool replicated)
 {
 	{
 		std::unique_lock _(m_dataMutex);
-
-		if (auto it = m_data.find(key); it != m_data.end())
+		if (data[0] == MsgPackNil)
+		{
+			m_data.erase(std::string { key });
+		}
+		else if (auto it = m_data.find(key); it != m_data.end())
 		{
 			if (data != it->second)
 			{
@@ -368,15 +397,13 @@ void StateBagImpl::SendKeyValue(int target, std::string_view key, std::string_vi
 	// new server will accept this message
 	if (m_parent->GetRole() == StateBagRole::ClientV2)
 	{
-		static thread_local std::vector<uint8_t> dataBuffer(131072);
-
 		if (!key.empty() && !value.empty())
 		{
-			net::ByteWriter writer (dataBuffer.data(), 131072);
-			StateBagMessage stateBagMessage (m_id, key, value);
-			stateBagMessage.Process(writer);
-
-			m_parent->QueueSend(target, std::string_view{ reinterpret_cast<const char*>(dataBuffer.data()), writer.GetOffset() });
+			net::packet::StateBagV2Packet stateBagPacket;
+			stateBagPacket.data.stateBagName = std::string_view(m_id);
+			stateBagPacket.data.key = key;
+			stateBagPacket.data.data = value;
+			m_parent->QueueSend(target, stateBagPacket);
 		}
 	}
 	else
@@ -402,7 +429,9 @@ void StateBagImpl::SendKeyValue(int target, std::string_view key, std::string_vi
 				dataBuffer.WriteBits(value.data(), value.size() * 8);
 			}
 
-			m_parent->QueueSend(target, std::string_view{ reinterpret_cast<const char*>(dataBuffer.GetBuffer().data()), dataBuffer.GetCurrentBit() / 8 });
+			net::packet::StateBagPacket stateBagPacket;
+			stateBagPacket.data.data = std::string_view{ reinterpret_cast<const char*>(dataBuffer.GetBuffer().data()), dataBuffer.GetCurrentBit() / 8 };
+			m_parent->QueueSend(target, stateBagPacket);
 		}
 	}
 }
@@ -683,7 +712,7 @@ void StateBagComponentImpl::HandlePacket(int source, std::string_view dataRaw, s
 		return;
 	}
 
-	std::vector<uint8_t> data(dataLength / 8);
+	std::vector<uint8_t> data((dataLength + 7) / 8);
 	buffer.ReadBits(data.data(), dataLength);
 
 	// handle data
@@ -723,7 +752,7 @@ void StateBagComponentImpl::HandlePacket(int source, std::string_view dataRaw, s
 	}
 }
 
-void StateBagComponentImpl::HandlePacketV2(int source, StateBagMessage& message, std::string_view* outBagNameName)
+void StateBagComponentImpl::HandlePacketV2(int source, net::packet::StateBagV2& message, std::string_view* outBagNameName)
 {
 	if (message.stateBagName.GetValue().empty() || message.key.GetValue().empty() || message.data.GetValue().empty())
 	{
@@ -761,7 +790,12 @@ void StateBagComponentImpl::HandlePacketV2(int source, StateBagMessage& message,
 	}
 }
 
-void StateBagComponentImpl::QueueSend(int target, std::string_view packet)
+void StateBagComponentImpl::QueueSend(int target, net::packet::StateBagPacket& packet)
+{
+	m_gameInterface->SendPacket(target, packet);
+}
+
+void StateBagComponentImpl::QueueSend(int target, net::packet::StateBagV2Packet& packet)
 {
 	m_gameInterface->SendPacket(target, packet);
 }
